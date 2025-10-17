@@ -40,7 +40,6 @@ enum Container {
     Array,
 }
 
-#[derive(Copy, Clone, Debug)]
 enum State {
     Init,
     ObjectStart,
@@ -51,22 +50,54 @@ enum State {
     Done,
 }
 
+/// A simple JSON parser that delivers event streams in "pull" mode.
 pub struct Parser<'input> {
+    /// The current offset in the input, for reporting spans and errors.
     offset: usize,
+    /// The remaining input left to process.
+    ///
+    /// The next byte to process is `input[0]`: we have advanced past `offset`
+    /// bytes already.
     input: &'input [u8],
-    container_stack: Vec<Container>,
+    /// The current state of the parser.
     state: State,
+    /// The stack of "old" containers. The current container isn't
+    /// on this stack, because it can be deduced from `state`.
+    ///
+    /// For example, consider the input
+    /// ```json
+    ///  { "foo": [1, 2] }`
+    /// ^0 ^1      ^2
+    /// ```
+    ///
+    /// At position `^0`, the state will be `Init` and the stack
+    /// will be empty. At position `^1`, the state will be `ObjectStart`
+    /// and the stack will be empty. At position `^2`, the state will
+    /// be `ArrayStart` and the stack will have an object on it.
+    container_stack: Vec<Container>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event<'input> {
+    /// The parser has entered an object (i.e., it has encountered a `{`).
+    ///
+    /// The next event will either be `EndObject`, or else a `String` containing
+    /// an object key.
     BeginObject,
+    /// The parser has left an object (i.e., it has encountered a `}`).
     EndObject,
+    /// The parser has entered an array (i.e., it has encountered a `[`).
     BeginArray,
+    /// The parser has left an array (i.e., it has encountered a `]`).
     EndArray,
+    /// The parser has encountered a number. The number has not been
+    /// parsed.
     Number(&'input str),
+    /// The parser has encountered a string.
     String(Cow<'input, str>),
+    /// The parser has encountered a boolean.
     Boolean(bool),
+    /// The parser has encountered a JSON `null` literal.
     Null,
 }
 
@@ -109,7 +140,16 @@ impl<'input> Parser<'input> {
 
         let ev = match self.state {
             State::Init => self.expect_value(State::Done)?,
-            State::ObjectStart => self.expect_key()?,
+            State::ObjectStart => {
+                let c = self.peek(ErrorKind::ExpectedFirstObjectEntry)?;
+                if c == b'}' {
+                    self.pop_container(Event::EndObject)
+                } else {
+                    let s = self.expect_string()?;
+                    self.state = State::ObjectAfterKey;
+                    s
+                }
+            }
             State::ObjectAfterKey => {
                 self.expect_byte(b':', self.err(ErrorKind::ExpectedColon))?;
                 self.skip_whitespace();
@@ -118,7 +158,7 @@ impl<'input> Parser<'input> {
             State::ObjectAfterValue => {
                 let c = self.peek(ErrorKind::ExpectedNextObjectEntry)?;
                 if c == b'}' {
-                    self.end_container()
+                    self.pop_container(Event::EndObject)
                 } else {
                     self.expect_byte(b',', self.err(ErrorKind::ExpectedComma))?;
                     self.skip_whitespace();
@@ -128,9 +168,9 @@ impl<'input> Parser<'input> {
                 }
             }
             State::ArrayStart => {
-                let c = self.peek(ErrorKind::ExpectedNextArrayEntry)?;
+                let c = self.peek(ErrorKind::ExpectedFirstArrayEntry)?;
                 if c == b']' {
-                    self.end_container()
+                    self.pop_container(Event::EndArray)
                 } else {
                     self.expect_value(State::ArrayAfterValue)?
                 }
@@ -138,7 +178,7 @@ impl<'input> Parser<'input> {
             State::ArrayAfterValue => {
                 let c = self.peek(ErrorKind::ExpectedNextArrayEntry)?;
                 if c == b']' {
-                    self.end_container()
+                    self.pop_container(Event::EndArray)
                 } else {
                     self.expect_byte(b',', self.err(ErrorKind::ExpectedComma))?;
                     self.expect_value(State::ArrayAfterValue)?
@@ -156,42 +196,22 @@ impl<'input> Parser<'input> {
         Ok(Some(ev))
     }
 
-    fn pop_container(&mut self) -> Event<'input> {
-        let finished = self.container_stack.pop().unwrap();
-        let next_state = match self.container_stack.last() {
-            Some(Container::Object) => State::ObjectAfterValue,
-            Some(Container::Array) => State::ArrayAfterValue,
-            None => State::Done,
-        };
-        self.state = next_state;
-        match finished {
-            Container::Object => Event::EndObject,
-            Container::Array => Event::EndArray,
-        }
-    }
-
-    fn end_container(&mut self) -> SpannedEvent<'input> {
+    fn pop_container(&mut self, event: Event<'input>) -> SpannedEvent<'input> {
         #[cfg(debug_assertions)]
         {
             let c = self.peek(ErrorKind::ExpectedEos).unwrap();
             assert!(c == b'}' || c == b']');
         }
+        self.state = match self.container_stack.pop() {
+            Some(Container::Object) => State::ObjectAfterValue,
+            Some(Container::Array) => State::ArrayAfterValue,
+            None => State::Done,
+        };
         self.advance(1);
         SpannedEvent {
             start: self.offset - 1,
             end: self.offset,
-            event: self.pop_container(),
-        }
-    }
-
-    fn expect_key(&mut self) -> Result<SpannedEvent<'input>, ParseError> {
-        let c = self.peek(ErrorKind::ExpectedNextObjectEntry)?;
-        if c == b'}' {
-            Ok(self.end_container())
-        } else {
-            let s = self.expect_string();
-            self.state = State::ObjectAfterKey;
-            s
+            event,
         }
     }
 
@@ -216,6 +236,18 @@ impl<'input> Parser<'input> {
         Ok(ev)
     }
 
+    fn remember_container(&mut self) {
+        match self.state {
+            State::Init | State::Done => {}
+            State::ObjectStart | State::ObjectAfterKey | State::ObjectAfterValue => {
+                self.container_stack.push(Container::Object)
+            }
+            State::ArrayStart | State::ArrayAfterValue => {
+                self.container_stack.push(Container::Array)
+            }
+        }
+    }
+
     fn expect_value(&mut self, next_state: State) -> Result<SpannedEvent<'input>, ParseError> {
         self.skip_whitespace();
         let c = self.peek(ErrorKind::ExpectedValue)?;
@@ -227,7 +259,7 @@ impl<'input> Parser<'input> {
                     end: self.offset + 1,
                     event: Event::BeginObject,
                 };
-                self.container_stack.push(Container::Object);
+                self.remember_container();
                 self.advance(1);
                 (ev, State::ObjectStart)
             }
@@ -237,7 +269,7 @@ impl<'input> Parser<'input> {
                     end: self.offset + 1,
                     event: Event::BeginArray,
                 };
-                self.container_stack.push(Container::Array);
+                self.remember_container();
                 self.advance(1);
                 (ev, State::ArrayStart)
             }
