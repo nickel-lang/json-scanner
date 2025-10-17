@@ -1,5 +1,5 @@
 [package]
-name = "my-json"
+name = "json-scanner"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,9 +7,17 @@ edition = "2024"
 memchr = "2.7.6"
 
 [dev-dependencies]
+divan = "0.1.21"
 libtest-mimic = "0.8.1"
+saphyr = "0.0.6"
+serde_json = "1.0.145"
 
 [[test]]
 name = "inputs"
 path = "tests/inputs.rs"
+harness = false
+
+[[bench]]
+name = "large_tree"
+path = "benches/large_tree.rs"
 harness = false
