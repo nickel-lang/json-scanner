@@ -5,3 +5,11 @@ edition = "2024"
 
 [dependencies]
 memchr = "2.7.6"
+
+[dev-dependencies]
+libtest-mimic = "0.8.1"
+
+[[test]]
+name = "inputs"
+path = "tests/inputs.rs"
+harness = false

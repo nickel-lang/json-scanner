@@ -6,10 +6,7 @@ use std::borrow::Cow;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidUtf8,
-    InvalidNumber,
     NumberWithLeadingZero,
-    // TODO: use one of the Expected variants instead
-    UnexpectedEos,
     UnterminatedString,
     UnescapedControl(u8),
     UnmatchedSurrogate,
@@ -20,10 +17,16 @@ pub enum ErrorKind {
     ExpectedFalse,
     ExpectedTrue,
     ExpectedNull,
+    ExpectedNumber,
+    ExpectedExponentStart,
     ExpectedValue,
     ExpectedString,
     ExpectedEos,
     ExpectedColon,
+    ExpectedFirstObjectEntry,
+    ExpectedNextObjectEntry,
+    ExpectedFirstArrayEntry,
+    ExpectedNextArrayEntry,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -37,6 +40,7 @@ enum Container {
     Array,
 }
 
+#[derive(Copy, Clone, Debug)]
 enum State {
     Init,
     ObjectStart,
@@ -66,6 +70,7 @@ pub enum Event<'input> {
     Null,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct SpannedEvent<'input> {
     pub start: usize,
     pub end: usize,
@@ -82,11 +87,11 @@ fn is_ascii_control(c: u8) -> bool {
 }
 
 fn is_high_surrogate(c: u16) -> bool {
-    (0xD00..=0xDBFF).contains(&c)
+    (0xD800..=0xDBFF).contains(&c)
 }
 
 fn is_low_surrogate(c: u16) -> bool {
-    (0xDC0..=0xDFFF).contains(&c)
+    (0xDC00..=0xDFFF).contains(&c)
 }
 
 impl<'input> Parser<'input> {
@@ -111,16 +116,19 @@ impl<'input> Parser<'input> {
                 self.expect_value(State::ObjectAfterValue)?
             }
             State::ObjectAfterValue => {
-                let c = self.peek()?;
+                let c = self.peek(ErrorKind::ExpectedNextObjectEntry)?;
                 if c == b'}' {
                     self.end_container()
                 } else {
                     self.expect_byte(b',', self.err(ErrorKind::ExpectedComma))?;
-                    self.expect_string()?
+                    self.skip_whitespace();
+                    let k = self.expect_string()?;
+                    self.state = State::ObjectAfterKey;
+                    k
                 }
             }
             State::ArrayStart => {
-                let c = self.peek()?;
+                let c = self.peek(ErrorKind::ExpectedNextArrayEntry)?;
                 if c == b']' {
                     self.end_container()
                 } else {
@@ -128,7 +136,7 @@ impl<'input> Parser<'input> {
                 }
             }
             State::ArrayAfterValue => {
-                let c = self.peek()?;
+                let c = self.peek(ErrorKind::ExpectedNextArrayEntry)?;
                 if c == b']' {
                     self.end_container()
                 } else {
@@ -137,7 +145,7 @@ impl<'input> Parser<'input> {
                 }
             }
             State::Done => {
-                if self.peek().is_ok() {
+                if self.peek(ErrorKind::ExpectedEos).is_ok() {
                     return Err(self.err(ErrorKind::ExpectedEos));
                 } else {
                     return Ok(None);
@@ -165,7 +173,7 @@ impl<'input> Parser<'input> {
     fn end_container(&mut self) -> SpannedEvent<'input> {
         #[cfg(debug_assertions)]
         {
-            let c = self.peek().unwrap();
+            let c = self.peek(ErrorKind::ExpectedEos).unwrap();
             assert!(c == b'}' || c == b']');
         }
         self.advance(1);
@@ -177,7 +185,7 @@ impl<'input> Parser<'input> {
     }
 
     fn expect_key(&mut self) -> Result<SpannedEvent<'input>, ParseError> {
-        let c = self.peek()?;
+        let c = self.peek(ErrorKind::ExpectedNextObjectEntry)?;
         if c == b'}' {
             Ok(self.end_container())
         } else {
@@ -210,7 +218,7 @@ impl<'input> Parser<'input> {
 
     fn expect_value(&mut self, next_state: State) -> Result<SpannedEvent<'input>, ParseError> {
         self.skip_whitespace();
-        let c = self.peek()?;
+        let c = self.peek(ErrorKind::ExpectedValue)?;
 
         let (ev, state) = match c {
             b'{' => {
@@ -293,11 +301,11 @@ impl<'input> Parser<'input> {
         }
     }
 
-    fn peek(&self) -> Result<u8, ParseError> {
+    fn peek(&self, expecting: ErrorKind) -> Result<u8, ParseError> {
         self.input
             .first()
             .copied()
-            .ok_or_else(|| self.err(ErrorKind::UnexpectedEos))
+            .ok_or_else(|| self.err(expecting))
     }
 
     fn err(&self, kind: ErrorKind) -> ParseError {
@@ -312,14 +320,14 @@ impl<'input> Parser<'input> {
         self.input = &self.input[count..];
     }
 
-    fn next_byte(&mut self) -> Result<u8, ParseError> {
-        let b = self.peek()?;
+    fn next_byte(&mut self, expecting: ErrorKind) -> Result<u8, ParseError> {
+        let b = self.peek(expecting)?;
         self.advance(1);
         Ok(b)
     }
 
     fn expect_byte(&mut self, b: u8, err: ParseError) -> Result<(), ParseError> {
-        if self.next_byte().is_ok_and(|x| x == b) {
+        if self.next_byte(err.kind).is_ok_and(|x| x == b) {
             Ok(())
         } else {
             Err(err)
@@ -327,7 +335,7 @@ impl<'input> Parser<'input> {
     }
 
     fn next_hex(&mut self, eos_error: ParseError) -> Result<u16, ParseError> {
-        let c = self.next_byte().map_err(|_| eos_error)?;
+        let c = self.next_byte(eos_error.kind).map_err(|_| eos_error)?;
         match c {
             b'0'..=b'9' => Ok((c - b'0') as u16),
             b'a'..=b'f' => Ok((c - b'a' + 10) as u16),
@@ -354,10 +362,14 @@ impl<'input> Parser<'input> {
         };
 
         loop {
-            let b = self.next_byte().map_err(|_| unterminated)?;
+            let b = self
+                .next_byte(ErrorKind::UnterminatedString)
+                .map_err(|_| unterminated)?;
 
             if b == b'\\' {
-                let b = self.next_byte().map_err(|_| unterminated)?;
+                let b = self
+                    .next_byte(ErrorKind::UnterminatedString)
+                    .map_err(|_| unterminated)?;
 
                 match b {
                     b'"' | b'\\' | b'/' => s.push(b),
@@ -510,7 +522,7 @@ impl<'input> NumberParser<'input> {
         }
     }
 
-    fn next_byte_or_error(&mut self) -> Result<u8, ParseError> {
+    fn next_byte_or(&mut self, expecting: ErrorKind) -> Result<u8, ParseError> {
         if self.offset < self.input.len() {
             let c = self.input[self.offset];
             self.offset += 1;
@@ -518,15 +530,17 @@ impl<'input> NumberParser<'input> {
         } else {
             Err(ParseError {
                 byte_offset: self.input.len(),
-                kind: ErrorKind::UnexpectedEos,
+                kind: expecting,
             })
         }
     }
 
     fn consume(&mut self) -> Result<&'input [u8], ParseError> {
-        let mut c = self.next_byte_or_error()?;
+        let mut c = self.next_byte_or(ErrorKind::ExpectedNumber)?;
         if c == b'-' {
-            c = self.next_byte_or_error()?;
+            c = self.next_byte_or(ErrorKind::ExpectedDigit)?;
+        } else if !c.is_ascii_digit() {
+            return Err(self.err(ErrorKind::ExpectedNumber));
         }
 
         if c == b'0' {
@@ -544,7 +558,7 @@ impl<'input> NumberParser<'input> {
             };
             c = next;
         } else {
-            return Err(self.err(ErrorKind::InvalidNumber));
+            return Err(self.err(ErrorKind::ExpectedDigit));
         }
 
         if c == b'.' {
@@ -556,9 +570,9 @@ impl<'input> NumberParser<'input> {
         }
 
         if c == b'e' || c == b'E' {
-            c = self.next_byte_or_error()?;
+            c = self.next_byte_or(ErrorKind::ExpectedExponentStart)?;
             if c == b'+' || c == b'-' {
-                c = self.next_byte_or_error()?;
+                c = self.next_byte_or(ErrorKind::ExpectedDigit)?;
             }
             if !c.is_ascii_digit() {
                 return Err(self.err(ErrorKind::ExpectedDigit));
@@ -658,11 +672,11 @@ mod tests {
 
         let failures = [
             ("01", ErrorKind::NumberWithLeadingZero, 1),
-            ("+1", ErrorKind::InvalidNumber, 0),
-            ("--1", ErrorKind::InvalidNumber, 1),
+            ("+1", ErrorKind::ExpectedNumber, 0),
+            ("--1", ErrorKind::ExpectedDigit, 1),
             ("0.", ErrorKind::ExpectedDigit, 2),
             ("0.,", ErrorKind::ExpectedDigit, 2),
-            ("1e-", ErrorKind::UnexpectedEos, 3),
+            ("1e-", ErrorKind::ExpectedDigit, 3),
         ];
 
         for (input, expected) in successes {
