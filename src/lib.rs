@@ -1,4 +1,52 @@
 #![allow(clippy::unusual_byte_groupings)]
+//! A simple JSON parser that reports positions.
+//!
+//! This is a pull-based, streaming parser. That means you create a
+//! [`Parser`], and then repeatedly call [`Parser::next_event`] to
+//! request the next [`Event`].
+//!
+//! # Example
+//!
+//! ```rust
+//! use json_scanner::{Parser, SpannedEvent, Event};
+//!
+//! let mut parser = Parser::new(br#"{ "foo": "bar" }"#);
+//! assert_eq!(
+//!   parser.next_event().unwrap().unwrap(),
+//!   SpannedEvent {
+//!     start: 0,
+//!     end: 1,
+//!     event: Event::BeginObject,
+//!   }
+//! );
+//!
+//! assert_eq!(
+//!   parser.next_event().unwrap().unwrap(),
+//!   SpannedEvent {
+//!     start: 2,
+//!     end: 7,
+//!     event: Event::String("foo".into()),
+//!   }
+//! );
+//!
+//! assert_eq!(
+//!   parser.next_event().unwrap().unwrap(),
+//!   SpannedEvent {
+//!     start: 9,
+//!     end: 14,
+//!     event: Event::String("bar".into()),
+//!   }
+//! );
+//!
+//! assert_eq!(
+//!   parser.next_event().unwrap().unwrap(),
+//!   SpannedEvent {
+//!     start: 15,
+//!     end: 16,
+//!     event: Event::EndObject,
+//!   }
+//! );
+//! ```
 
 use memchr::memchr;
 use std::borrow::Cow;

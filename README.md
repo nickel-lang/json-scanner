@@ -21,9 +21,9 @@ point it can gain a `serde`-ish wrapper like the `toml` crate has with
 [`serde_spanned`](https://crates.io/serde_spanned).
 
 ```rust
-let mut parser = Parser::new(r#"{ "foo": "bar" }"#);
+let mut parser = Parser::new(br#"{ "foo": "bar" }"#);
 assert_eq!(
-  parser.next_event().unwrap(),
+  parser.next_event().unwrap().unwrap(),
   SpannedEvent {
     start: 0,
     end: 1,
@@ -32,7 +32,7 @@ assert_eq!(
 );
 
 assert_eq!(
-  parser.next_event().unwrap(),
+  parser.next_event().unwrap().unwrap(),
   SpannedEvent {
     start: 2,
     end: 7,
@@ -41,7 +41,7 @@ assert_eq!(
 );
 
 assert_eq!(
-  parser.next_event().unwrap(),
+  parser.next_event().unwrap().unwrap(),
   SpannedEvent {
     start: 9,
     end: 14,
@@ -50,7 +50,7 @@ assert_eq!(
 );
 
 assert_eq!(
-  parser.next_event().unwrap(),
+  parser.next_event().unwrap().unwrap(),
   SpannedEvent {
     start: 15,
     end: 16,
