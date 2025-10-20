@@ -1,0 +1,35 @@
+env:
+  RUST_STABLE_VER: "1.90"
+
+on:
+  merge_group:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - master
+
+jobs:
+  test and lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkint out the repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: '0'
+      
+      - name: Install Rust ${{ env.RUST_STABLE_VER }}
+        run: rustup toolchain install ${ env.RUST_STABLE_VER }}
+
+      - name: Run cargo fmt
+        run: cargo fmt --all --check
+
+      - name: Restore cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo clippy
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Run cargo test
+        run: cargo test
