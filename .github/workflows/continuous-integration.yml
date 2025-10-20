@@ -14,7 +14,7 @@ jobs:
   test-and-lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkint out the repository
+      - name: Checking out the repository
         uses: actions/checkout@v5
         with:
           fetch-depth: '0'
