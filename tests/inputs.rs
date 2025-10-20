@@ -1,5 +1,5 @@
+use json_scanner::Parser;
 use libtest_mimic::{Arguments, Trial};
-use my_json::Parser;
 use std::{path::Path, process::ExitCode};
 
 pub fn main() -> ExitCode {

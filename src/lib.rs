@@ -3,6 +3,7 @@
 use memchr::memchr;
 use std::borrow::Cow;
 
+/// All the different kinds of errors we can encounter when parsing JSON.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidUtf8,
@@ -29,11 +30,60 @@ pub enum ErrorKind {
     ExpectedNextArrayEntry,
 }
 
+impl std::error::Error for ErrorKind {}
+
+impl std::fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ErrorKind::InvalidUtf8 => "invalid UTF-8 in string",
+            ErrorKind::NumberWithLeadingZero => "numbers with a leading zero",
+            ErrorKind::UnterminatedString => "unterminated string",
+            ErrorKind::UnmatchedSurrogate => "unmatched UTF-16 surrogate",
+            ErrorKind::ExpectedComma => "expected a comma (,)",
+            ErrorKind::ExpectedDigit => "expected a digit",
+            ErrorKind::ExpectedFalse => "expected `false`",
+            ErrorKind::ExpectedTrue => "expected `true`",
+            ErrorKind::ExpectedNull => "expected `null`",
+            ErrorKind::ExpectedNumber => "expected a number",
+            ErrorKind::ExpectedExponentStart => "expected an exponent",
+            ErrorKind::ExpectedValue => {
+                "expected an object, array, string, boolean, number, or null"
+            }
+            ErrorKind::ExpectedString => "expected a string",
+            ErrorKind::ExpectedEos => "expected the end",
+            ErrorKind::ExpectedColon => "expected a colon (:)",
+            ErrorKind::ExpectedFirstObjectEntry => "expected a string or `}`",
+            ErrorKind::ExpectedNextObjectEntry => "expected a string or `}`",
+            ErrorKind::ExpectedFirstArrayEntry => "expected a value or ]",
+            ErrorKind::ExpectedNextArrayEntry => "expected a value or ]",
+            ErrorKind::InvalidHex(_) => "expected a hex digit",
+            ErrorKind::UnescapedControl(c) => {
+                return write!(f, "unescaped control character {c:x} in string");
+            }
+            ErrorKind::InvalidEscape(c) => {
+                return write!(f, "invalid escape character {c:x} in string");
+            }
+        };
+        s.fmt(f)
+    }
+}
+
+/// A parse error and its location.
 #[derive(Copy, Clone, Debug)]
 pub struct ParseError {
+    /// The byte offset in the input that caused the error.
     pub byte_offset: usize,
+    /// The kind of error.
     pub kind: ErrorKind,
 }
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parse error at byte {}: {}", self.byte_offset, self.kind)
+    }
+}
+
+impl std::error::Error for ParseError {}
 
 enum Container {
     Object,
@@ -41,12 +91,26 @@ enum Container {
 }
 
 enum State {
+    /// The parser has not yet consumed any input. The next non-whitespace
+    /// character should be the beginning of a value.
     Init,
+    /// We just started a new object. The next non-whitespace character
+    /// should be `}` or the start of a key (i.e., a string).
     ObjectStart,
+    /// We just read an object key. The next non-whitespace character
+    /// should be `:`, followed by a value.
     ObjectAfterKey,
+    /// We just read an object key/value pair. The next non-whitespace character
+    /// should be `}`, or `,` followed by a value.
     ObjectAfterValue,
+    /// We just started an array. The next non-whitespace character
+    /// should be `]` or the beginning of a value.
     ArrayStart,
+    /// We just read an array element. The next non-whitespace character
+    /// should `]`, or `,` followed by a value.
     ArrayAfterValue,
+    /// We're finished. If there are any more non-whitespace characters,
+    /// it's an error.
     Done,
 }
 
@@ -77,6 +141,7 @@ pub struct Parser<'input> {
     container_stack: Vec<Container>,
 }
 
+/// The various different things that a JSON parser can encounter.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event<'input> {
     /// The parser has entered an object (i.e., it has encountered a `{`).
@@ -101,6 +166,8 @@ pub enum Event<'input> {
     Null,
 }
 
+/// A JSON parsing event emitted by [`Parser::next_event`], consisting of an
+/// [`Event`] and its source location.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SpannedEvent<'input> {
     pub start: usize,
@@ -117,15 +184,18 @@ fn is_ascii_control(c: u8) -> bool {
     c <= 0x1F
 }
 
+/// See https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-3/#G2630
 fn is_high_surrogate(c: u16) -> bool {
     (0xD800..=0xDBFF).contains(&c)
 }
 
+/// See https://www.unicode.org/versions/Unicode17.0.0/core-spec/chapter-3/#G2630
 fn is_low_surrogate(c: u16) -> bool {
     (0xDC00..=0xDFFF).contains(&c)
 }
 
 impl<'input> Parser<'input> {
+    /// Create a new JSON parser for parsing `input`.
     pub fn new(input: &'input [u8]) -> Self {
         Parser {
             input,
@@ -135,6 +205,11 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// Read the next event from the input.
+    ///
+    /// An `Err` return value indicates that parsing has failed. In that case, the
+    /// parser should not be used anymore. A return value of `Ok(None)` indicates that
+    /// there is nothing more to parse.
     pub fn next_event(&mut self) -> Result<Option<SpannedEvent<'input>>, ParseError> {
         self.skip_whitespace();
 
@@ -196,6 +271,10 @@ impl<'input> Parser<'input> {
         Ok(Some(ev))
     }
 
+    /// Handle the end of a container.
+    ///
+    /// The current character of input should be either `]` or `}`. We advance
+    /// past that character, while updating the parser state and container stack.
     fn pop_container(&mut self, event: Event<'input>) -> SpannedEvent<'input> {
         #[cfg(debug_assertions)]
         {
@@ -215,6 +294,7 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// Consume some literal bytes from the input, erroring if we don't get them.
     fn expect_literal(&mut self, literal: &[u8], error: ErrorKind) -> Result<(), ParseError> {
         if self.input.starts_with(literal) {
             self.advance(literal.len());
@@ -224,6 +304,7 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// Consume a string and return it.
     fn expect_string(&mut self) -> Result<SpannedEvent<'input>, ParseError> {
         let start = self.offset;
         self.expect_byte(b'"', self.err(ErrorKind::ExpectedString))?;
@@ -236,6 +317,7 @@ impl<'input> Parser<'input> {
         Ok(ev)
     }
 
+    /// If we're in a container, push it onto the container stack.
     fn remember_container(&mut self) {
         match self.state {
             State::Init | State::Done => {}
@@ -248,6 +330,10 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// We expect that the next thing in the input is a JSON value.
+    ///
+    /// If it's a simple value, consume it and return it. If it's a container,
+    /// consume just the opening character.
     fn expect_value(&mut self, next_state: State) -> Result<SpannedEvent<'input>, ParseError> {
         self.skip_whitespace();
         let c = self.peek(ErrorKind::ExpectedValue)?;
@@ -333,6 +419,7 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// Return the next input byte, or error with `expecting` if there are no more bytes.
     fn peek(&self, expecting: ErrorKind) -> Result<u8, ParseError> {
         self.input
             .first()
@@ -342,6 +429,9 @@ impl<'input> Parser<'input> {
 
     fn err(&self, kind: ErrorKind) -> ParseError {
         ParseError {
+            // Typically, we consume -- as opposed to peeking at -- a character
+            // of input before we detect that it caused an error. Therefore,
+            // the most common error location is one byte ago.
             byte_offset: self.offset.saturating_sub(1),
             kind,
         }
@@ -352,12 +442,15 @@ impl<'input> Parser<'input> {
         self.input = &self.input[count..];
     }
 
+    /// Consume and return the next input byte, or error with `expecting` if there are
+    /// no more bytes.
     fn next_byte(&mut self, expecting: ErrorKind) -> Result<u8, ParseError> {
         let b = self.peek(expecting)?;
         self.advance(1);
         Ok(b)
     }
 
+    /// Consume the next byte, raising an error if it isn't `b`.
     fn expect_byte(&mut self, b: u8, err: ParseError) -> Result<(), ParseError> {
         if self.next_byte(err.kind).is_ok_and(|x| x == b) {
             Ok(())
@@ -366,25 +459,34 @@ impl<'input> Parser<'input> {
         }
     }
 
-    fn next_hex(&mut self, eos_error: ParseError) -> Result<u16, ParseError> {
+    /// Consume the next byte of input, raising an error if it isn't a hex digit.
+    ///
+    /// Returns the numeric value of the hex digit, as a number between 0 and
+    /// 15 inclusive.
+    fn next_hex(&mut self, eos_error: ParseError) -> Result<u8, ParseError> {
         let c = self.next_byte(eos_error.kind).map_err(|_| eos_error)?;
         match c {
-            b'0'..=b'9' => Ok((c - b'0') as u16),
-            b'a'..=b'f' => Ok((c - b'a' + 10) as u16),
-            b'A'..=b'F' => Ok((c - b'A' + 10) as u16),
+            b'0'..=b'9' => Ok(c - b'0'),
+            b'a'..=b'f' => Ok(c - b'a' + 10),
+            b'A'..=b'F' => Ok(c - b'A' + 10),
             _ => Err(self.err(ErrorKind::InvalidHex(c))),
         }
     }
 
+    /// Read four hex keys from the input, and return the `u16` value that they specify.
     fn four_hex(&mut self, eos_error: ParseError) -> Result<u16, ParseError> {
         let mut code = 0;
-        code += self.next_hex(eos_error)? << 12;
-        code += self.next_hex(eos_error)? << 8;
-        code += self.next_hex(eos_error)? << 4;
-        code += self.next_hex(eos_error)?;
+        code += (self.next_hex(eos_error)? as u16) << 12;
+        code += (self.next_hex(eos_error)? as u16) << 8;
+        code += (self.next_hex(eos_error)? as u16) << 4;
+        code += self.next_hex(eos_error)? as u16;
         Ok(code)
     }
 
+    /// Parse a JSON string, not including its opening quotation mark, substituting any escape sequences.
+    ///
+    /// This is supposed to be correct, but not particularly optimized. There's
+    /// a fast path for strings with no escapes, and this is the fallback.
     fn parse_str_tail_slow(&mut self, capacity: usize) -> Result<Cow<'input, str>, ParseError> {
         let mut s = Vec::with_capacity(capacity);
         let string_start_offset = self.offset.saturating_sub(1);
@@ -460,6 +562,7 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// Parse a JSON string, not including its opening quotation mark.
     fn parse_str_tail(&mut self) -> Result<Cow<'input, str>, ParseError> {
         let Some(close) = memchr(b'"', self.input) else {
             return Err(self.err(ErrorKind::UnterminatedString));
@@ -490,6 +593,9 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// Consume a JSON number without parsing it.
+    ///
+    /// This advances the input past the number and then returns the unparsed number.
     fn consume_number(&mut self) -> Result<&'input str, ParseError> {
         let mut number_state = NumberParser {
             input: self.input,
@@ -500,12 +606,19 @@ impl<'input> Parser<'input> {
             e
         })?;
         self.advance(n.len());
+        // unwrap: a JSON number contains only ASCII characters. So if we haven't
+        // errored yet, it's valid UTF-8.
         Ok(str::from_utf8(n).unwrap())
     }
 }
 
+/// A parser for JSON numbers.
 struct NumberParser<'input> {
+    /// The input data we're parsing. Unlike the input data
+    /// in [`Parser`], this one does not advance: the next byte
+    /// to be read is at `self.input[self.offset]`.
     input: &'input [u8],
+    /// Our current offset in `input`.
     offset: usize,
 }
 
@@ -517,6 +630,7 @@ impl<'input> NumberParser<'input> {
         }
     }
 
+    /// Advance the input past all digits.
     fn skip_digits(&mut self) {
         match self.input[self.offset..]
             .iter()
@@ -527,6 +641,8 @@ impl<'input> NumberParser<'input> {
         }
     }
 
+    /// Advance the input past all digits, raising an error if there
+    /// aren't any.
     fn skip_digits_at_least_one(&mut self) -> Result<(), ParseError> {
         let prev_offset = self.offset;
         self.skip_digits();
@@ -540,10 +656,12 @@ impl<'input> NumberParser<'input> {
         }
     }
 
+    /// Returns the part of the input that was consumed so far.
     fn number_so_far(&self) -> &'input [u8] {
         &self.input[..self.offset]
     }
 
+    /// Returns the next byte if there is one.
     fn next_byte(&mut self) -> Option<u8> {
         if self.offset < self.input.len() {
             let c = self.input[self.offset];
@@ -554,6 +672,7 @@ impl<'input> NumberParser<'input> {
         }
     }
 
+    /// Consumes and returns the next byte, or errors with `expecting` if there are no more.
     fn next_byte_or(&mut self, expecting: ErrorKind) -> Result<u8, ParseError> {
         if self.offset < self.input.len() {
             let c = self.input[self.offset];
@@ -567,6 +686,10 @@ impl<'input> NumberParser<'input> {
         }
     }
 
+    /// Try to parse the beginning of the input as a number.
+    ///
+    /// If successful, returns the part of the input that could
+    /// be recognized as a number.
     fn consume(&mut self) -> Result<&'input [u8], ParseError> {
         let mut c = self.next_byte_or(ErrorKind::ExpectedNumber)?;
         if c == b'-' {
