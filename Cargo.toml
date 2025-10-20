@@ -1,8 +1,11 @@
 [package]
-name = "json-scanner"
+name = "json_scanner"
 license = "MIT"
 version = "0.1.0"
 edition = "2024"
+description = "A simple JSON parser that reports positions"
+documentation = "https://docs.rs/json_scanner"
+repository = "https://github.com/nickel-lang/json_scanner"
 
 [dependencies]
 memchr = "2.7.6"
