@@ -11,7 +11,7 @@ on:
       - master
 
 jobs:
-  test and lint:
+  test-and-lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkint out the repository
